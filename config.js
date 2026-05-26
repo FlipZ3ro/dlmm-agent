@@ -57,6 +57,12 @@ export const config = {
   risk: {
     maxPositions:    u.maxPositions    ?? 3,
     maxDeployAmount: u.maxDeployAmount ?? 50,
+    // Daily loss circuit breaker (0 = disabled). Stops new screening when
+    // realized USD loss today exceeds this % of starting wallet value.
+    maxDailyLossPct: u.maxDailyLossPct  ?? 0,
+    // SOL market regime guard (0 = disabled). Pauses screening when SOL price
+    // has dropped this % within the last ~1h.
+    solRegimeDropPct: u.solRegimeDropPct ?? 0,
   },
 
   // ─── Pool Screening Thresholds ───────────
@@ -76,6 +82,11 @@ export const config = {
     timeframe:         u.timeframe         ?? "5m",
     category:          u.category          ?? "trending",
     minTokenFeesSol:   u.minTokenFeesSol   ?? 30,  // global fees paid (priority+jito tips). below = bundled/scam
+    maxVolatility:     u.maxVolatility     ?? 8,   // refuse pools whose volatility exceeds this — too volatile = bag risk
+    // Anti-FOMO / anti-knife: refuse pool whose 1h pool_price_change_pct is
+    // farther from 0 than this (e.g. 15 → refuse if pumped >15% or dumped <-15%
+    // in the last hour). Set to 0/null to disable.
+    maxAbsPriceChange1hPct: u.maxAbsPriceChange1hPct ?? 15,
     useDiscordSignals: u.useDiscordSignals ?? false,
     discordSignalMode: u.discordSignalMode ?? "merge", // merge | only
     avoidPvpSymbols:   u.avoidPvpSymbols   ?? true, // avoid exact-symbol rivals with real active pools
@@ -96,6 +107,9 @@ export const config = {
     autoSwapAfterClaim:    u.autoSwapAfterClaim    ?? false,
     outOfRangeBinsToClose: u.outOfRangeBinsToClose ?? 10,
     outOfRangeWaitMinutes: u.outOfRangeWaitMinutes ?? 30,
+    // Don't close OOR positions younger than this — gives them time to recover
+    // or earn fees. Stop-loss / Rule 3 (far above range) still fire regardless.
+    minPositionAgeMinutes: u.minPositionAgeMinutes ?? 30,
     oorCooldownTriggerCount: u.oorCooldownTriggerCount ?? 3,
     oorCooldownHours:       u.oorCooldownHours       ?? 12,
     repeatDeployCooldownEnabled: u.repeatDeployCooldownEnabled ?? true,
@@ -104,7 +118,7 @@ export const config = {
     repeatDeployCooldownScope: u.repeatDeployCooldownScope ?? "token", // pool | token | both
     repeatDeployCooldownMinFeeEarnedPct: u.repeatDeployCooldownMinFeeEarnedPct ?? u.repeatDeployCooldownMinFeeYieldPct ?? 0,
     minVolumeToRebalance:  u.minVolumeToRebalance  ?? 1000,
-    stopLossPct:           u.stopLossPct           ?? u.emergencyPriceDropPct ?? -50,
+    stopLossPct:           u.stopLossPct           ?? u.emergencyPriceDropPct ?? -25,
     takeProfitPct:         u.takeProfitPct         ?? u.takeProfitFeePct ?? 5,
     minFeePerTvl24h:       u.minFeePerTvl24h       ?? 7,
     minAgeBeforeYieldCheck: u.minAgeBeforeYieldCheck ?? 60, // minutes before low yield can trigger close
@@ -225,7 +239,9 @@ export function computeDeployAmount(walletSol) {
   const deployable = Math.max(0, walletSol - reserve);
   const dynamic    = deployable * pct;
   const result     = Math.min(ceil, Math.max(floor, dynamic));
-  return parseFloat(result.toFixed(2));
+  // Keep enough precision for sub-0.01 SOL test deploys (e.g. 0.001 SOL).
+  const decimals   = result < 0.01 ? 6 : result < 1 ? 4 : 2;
+  return parseFloat(result.toFixed(decimals));
 }
 
 /**
@@ -240,6 +256,8 @@ export function reloadScreeningThresholds() {
     const s = config.screening;
     if (fresh.minFeeActiveTvlRatio != null) s.minFeeActiveTvlRatio = fresh.minFeeActiveTvlRatio;
     if (fresh.minTokenFeesSol  != null) s.minTokenFeesSol  = fresh.minTokenFeesSol;
+    if (fresh.maxVolatility    != null) s.maxVolatility    = fresh.maxVolatility;
+    if (fresh.maxAbsPriceChange1hPct != null) s.maxAbsPriceChange1hPct = fresh.maxAbsPriceChange1hPct;
     if (fresh.maxTop10Pct      != null) s.maxTop10Pct      = fresh.maxTop10Pct;
     if (fresh.useDiscordSignals !== undefined) s.useDiscordSignals = fresh.useDiscordSignals;
     if (fresh.discordSignalMode != null) s.discordSignalMode = fresh.discordSignalMode;

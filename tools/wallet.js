@@ -65,15 +65,17 @@ export async function getWalletBalances() {
   }
 
   const HELIUS_KEY = process.env.HELIUS_API_KEY;
-  if (!HELIUS_KEY) {
-    log("wallet_error", "HELIUS_API_KEY not set in .env");
-    return { wallet: walletAddress, sol: 0, sol_price: 0, sol_usd: 0, usdc: 0, tokens: [], total_usd: 0, error: "Helius API key missing" };
-  }
 
   try {
+    if (!HELIUS_KEY) {
+      // Skip Helius entirely — jump to RPC fallback for the SOL balance.
+      // USD/token enrichment will be unavailable, but the agent can still
+      // make deploy/screening decisions.
+      throw new Error("HELIUS_API_KEY not configured");
+    }
     const url = `https://api.helius.xyz/v1/wallet/${walletAddress}/balances?api-key=${HELIUS_KEY}`;
     const res = await fetch(url);
-    
+
     if (!res.ok) {
       throw new Error(`Helius API error: ${res.status} ${res.statusText}`);
     }
@@ -109,16 +111,37 @@ export async function getWalletBalances() {
     };
   } catch (error) {
     log("wallet_error", error.message);
-    return {
-      wallet: walletAddress,
-      sol: 0,
-      sol_price: 0,
-      sol_usd: 0,
-      usdc: 0,
-      tokens: [],
-      total_usd: 0,
-      error: error.message,
-    };
+    // Fallback: get SOL balance directly from RPC
+    try {
+      const { Connection, PublicKey } = await import("@solana/web3.js");
+      const rpcUrl = process.env.RPC_URL || config.rpcUrl;
+      const conn = new Connection(rpcUrl, "confirmed");
+      const lamports = await conn.getBalance(new PublicKey(walletAddress));
+      const solBalance = lamports / 1e9;
+      log("wallet", `RPC fallback: ${solBalance} SOL`);
+      return {
+        wallet: walletAddress,
+        sol: solBalance,
+        sol_price: 0,
+        sol_usd: 0,
+        usdc: 0,
+        tokens: [],
+        total_usd: 0,
+        error: null,
+      };
+    } catch (rpcErr) {
+      log("wallet_error", `RPC fallback also failed: ${rpcErr.message}`);
+      return {
+        wallet: walletAddress,
+        sol: 0,
+        sol_price: 0,
+        sol_usd: 0,
+        usdc: 0,
+        tokens: [],
+        total_usd: 0,
+        error: error.message,
+      };
+    }
   }
 }
 

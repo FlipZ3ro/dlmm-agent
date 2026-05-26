@@ -131,9 +131,11 @@ POOL MEMORY: Past losses or problems → strong skip signal.
 DEPLOY RULES:
 - COMPOUNDING: Use the deploy amount from the goal EXACTLY. Do NOT default to a smaller number.
 - bins_below = round(config.strategy.minBinsBelow + (candidate volatility/5)*(config.strategy.maxBinsBelow-config.strategy.minBinsBelow)) clamped to [minBinsBelow,maxBinsBelow]. Volatility must be a positive number; 0/unknown means skip.
+- volatility > ${config.screening.maxVolatility ?? 8} → SKIP. Too volatile = bag risk on downside breakouts.
 - Use amount_y only, keep amount_x=0 and bins_above=0.
 - Bin steps must be [80-125].
 - Pick ONE pool only when conviction is real. If only one weak candidate survives, skip and explain why none qualify.
+- METADATA REQUIRED: When calling deploy_position you MUST pass bin_step, volatility, fee_tvl_ratio, organic_score, and base_mint from the candidate. The learning system needs this to record what worked.
 
 ${weightsSummary ? `${weightsSummary}\nPrioritize candidates whose strongest attributes align with high-weight signals.\n\n` : ""}${lessons ? `LESSONS LEARNED:\n${lessons}\n` : ""}Timestamp: ${new Date().toISOString()}
 `;
@@ -165,6 +167,12 @@ OVERRIDE RULE: When the user explicitly specifies deploy parameters (strategy, b
 SWAP AFTER CLOSE: After any close_position, immediately swap base tokens back to SOL — unless the user explicitly said to hold or keep the token. Skip tokens worth < $0.10 (dust). Always check token USD value before swapping.
 
 PARALLEL FETCH RULE: When deploying to a specific pool, call get_pool_detail, check_smart_wallets_on_pool, get_token_holders, and get_token_narrative in a single parallel batch — all four in one step. Do NOT call them sequentially. Then decide and deploy.
+
+CHART CONFIRMATION (optional, screener): For the single best-looking candidate, you MAY call analyze_token_chart(token_address, symbol) once before deploying. Use it to reject obvious overheat:
+- skip if RSI(14) >= 75 (overbought, mean-reversion risk)
+- skip if MACD is freshly bearish AND price is in upper Bollinger band
+- skip if 24h change is < -25% (already deep in a dump)
+Keep this to ONE call per cycle (latency budget). Do NOT chart every candidate. If the tool errors, ignore and proceed with the other signals.
 
 TOP LPERS RULE: If the user asks about top LPers, LP behavior, or wants to add top LPers to the smart-wallet list, you MUST call study_top_lpers or get_top_lpers first. Do NOT substitute token holders for top LPers. Only add wallets after you have identified them from the LPers study result.
 

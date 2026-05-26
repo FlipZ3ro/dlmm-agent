@@ -20,6 +20,7 @@ import { addToBlacklist, removeFromBlacklist, listBlacklist } from "../token-bla
 import { blockDev, unblockDev, listBlockedDevs } from "../dev-blocklist.js";
 import { addSmartWallet, removeSmartWallet, listSmartWallets, checkSmartWalletsOnPool } from "../smart-wallets.js";
 import { getTokenInfo, getTokenHolders, getTokenNarrative } from "./token.js";
+import { analyzeTokenChart } from "./chart-analyzer.js";
 import { config, reloadScreeningThresholds, MIN_SAFE_BINS_BELOW } from "../config.js";
 import { getRecentDecisions } from "../decision-log.js";
 import fs from "fs";
@@ -70,6 +71,10 @@ function poolDetailFeeActiveTvlRatio(pool) {
 
 function poolDetailVolatility(pool) {
   return numberOrNull(pool?.volatility);
+}
+
+function poolDetailOrganicScore(pool) {
+  return numberOrNull(pool?.token_x?.organic_score ?? pool?.base?.organic_score);
 }
 
 async function fetchFreshPoolDetail(poolAddress, timeframe = config.screening.timeframe || "5m") {
@@ -150,6 +155,34 @@ async function validateDeployPoolThresholds(args) {
     };
   }
 
+  const maxVolatility = numberOrNull(config.screening.maxVolatility);
+  if (maxVolatility != null && maxVolatility > 0 && volatility > maxVolatility) {
+    return {
+      pass: false,
+      reason: `Pool ${volatilityTimeframe} volatility ${volatility} is above configured maxVolatility ${maxVolatility}.`,
+    };
+  }
+
+  // Anti-FOMO: refuse if the pool has pumped/dumped sharply in the last hour.
+  // We're about to LP single-side SOL — entering during a pump means buying at
+  // peak; entering during a dump means catching a falling knife.
+  const maxAbs1hPct = numberOrNull(config.screening.maxAbsPriceChange1hPct);
+  if (maxAbs1hPct != null && maxAbs1hPct > 0) {
+    let hourlyDetail;
+    try {
+      hourlyDetail = await fetchFreshPoolDetail(args.pool_address, "1h");
+    } catch (error) {
+      log("safety_warn", `1h price-change fetch failed for ${args.pool_address.slice(0, 8)}: ${error.message}`);
+    }
+    const change1h = numberOrNull(hourlyDetail?.pool_price_change_pct);
+    if (change1h != null && Math.abs(change1h) > maxAbs1hPct) {
+      return {
+        pass: false,
+        reason: `Pool 1h price change ${change1h.toFixed(2)}% exceeds maxAbsPriceChange1hPct ${maxAbs1hPct}% — anti-FOMO/anti-knife.`,
+      };
+    }
+  }
+
   const actualBinStep = poolDetailBinStep(detail);
   const minStep = numberOrNull(config.screening.minBinStep);
   const maxStep = numberOrNull(config.screening.maxBinStep);
@@ -166,7 +199,16 @@ async function validateDeployPoolThresholds(args) {
     };
   }
 
-  return { pass: true };
+  return {
+    pass: true,
+    fresh: {
+      volatility,
+      bin_step: actualBinStep,
+      fee_tvl_ratio: feeActiveTvlRatio,
+      organic_score: poolDetailOrganicScore(detail),
+      tvl,
+    },
+  };
 }
 
 // Registered by index.js so update_config can restart cron jobs when intervals change
@@ -304,6 +346,7 @@ const toolMap = {
   block_deployer: blockDev,
   unblock_deployer: unblockDev,
   list_blocked_deployers: listBlockedDevs,
+  analyze_token_chart: analyzeTokenChart,
   add_lesson: ({ rule, tags, pinned, role }) => {
     addLesson(rule, tags || [], { pinned: !!pinned, role: role || null });
     return { saved: true, rule, pinned: !!pinned, role: role || "all" };
@@ -666,6 +709,23 @@ async function runSafetyChecks(name, args) {
       const poolThresholds = await validateDeployPoolThresholds(args);
       if (!poolThresholds.pass) return poolThresholds;
 
+      // Backfill metadata from fresh pool data so the learning system records
+      // real values even if the LLM forgot to pass them through.
+      if (poolThresholds.fresh) {
+        if (args.volatility == null && poolThresholds.fresh.volatility != null) {
+          args.volatility = poolThresholds.fresh.volatility;
+        }
+        if (args.bin_step == null && poolThresholds.fresh.bin_step != null) {
+          args.bin_step = poolThresholds.fresh.bin_step;
+        }
+        if (args.fee_tvl_ratio == null && poolThresholds.fresh.fee_tvl_ratio != null) {
+          args.fee_tvl_ratio = poolThresholds.fresh.fee_tvl_ratio;
+        }
+        if (args.organic_score == null && poolThresholds.fresh.organic_score != null) {
+          args.organic_score = poolThresholds.fresh.organic_score;
+        }
+      }
+
       // Reject pools with bin_step out of configured range
       const minStep = config.screening.minBinStep;
       const maxStep = config.screening.maxBinStep;
@@ -775,8 +835,8 @@ async function runSafetyChecks(name, args) {
         };
       }
 
-      const minDeploy = Math.max(0.1, config.management.deployAmountSol);
-      if (amountY < minDeploy) {
+      const minDeploy = Number(config.management.deployAmountSol) || 0;
+      if (minDeploy > 0 && amountY < minDeploy) {
         return {
           pass: false,
           reason: `Amount ${amountY} SOL is below the minimum deploy amount (${minDeploy} SOL). Use at least ${minDeploy} SOL.`,

@@ -1111,6 +1111,31 @@ Blacklisted tokens are filtered BEFORE the LLM even sees pool candidates.`,
       }
     }
   },
+
+  {
+    type: "function",
+    function: {
+      name: "analyze_token_chart",
+      description: `Analyze a token's price chart with RSI, MACD, Bollinger Bands, and Fibonacci levels.
+Useful during screening to check whether a candidate is overbought/oversold or near key support/resistance before deploying.
+Returns: price, 24h change, RSI(14), MACD vs signal, Bollinger upper/lower, Fibonacci retracement levels, and discrete buy/sell signal strings.
+Note: this uses DexScreener (free) and optionally Birdeye; data may be missing for very new pools.`,
+      parameters: {
+        type: "object",
+        properties: {
+          token_address: {
+            type: "string",
+            description: "Base mint address of the token (NOT the pool address)"
+          },
+          symbol: {
+            type: "string",
+            description: "Optional ticker, e.g. \"HOPPY\" — only used for display"
+          }
+        },
+        required: ["token_address"]
+      }
+    }
+  },
 ];
 
 export const tools = toolDefinitions.map((tool) => ({

@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# Block commit if real-looking secrets sneak into tracked files.
+# Bypass (emergency): git commit --no-verify
+set -e
+
+# 1. Block any .env file (only .env.example allowed)
+LEAKED_ENV=$(git diff --cached --name-only --diff-filter=ACM | grep -E "^\.env(\.|$)" | grep -v "^\.env\.example$" || true)
+if [ -n "$LEAKED_ENV" ]; then
+  echo "🛑 pre-commit: refusing to commit .env file(s):"
+  echo "$LEAKED_ENV" | sed 's/^/    /'
+  echo "Add to .gitignore or remove from staging."
+  exit 1
+fi
+
+# 2. Scan staged content for real secret patterns
+PATTERNS=(
+  # Solana base58 private keys (87-88 chars, no I/O/0/l/+/=)
+  '\b[1-9A-HJ-NP-Za-km-z]{87,88}\b'
+  # Helius API key (UUID-like)
+  '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+  # HiveMind keys
+  'hm_[0-9a-f]{40,}'
+  # OpenRouter keys
+  'sk-or-[A-Za-z0-9_-]{20,}'
+  # Generic JWT-ish or long base64 tokens after = on .env-like lines
+  '_KEY=[A-Za-z0-9_+/-]{40,}'
+)
+
+FOUND=0
+for pat in "${PATTERNS[@]}"; do
+  HITS=$(git diff --cached -U0 | grep -E "^\+" | grep -vE "^\+\+\+" | grep -E "$pat" || true)
+  if [ -n "$HITS" ]; then
+    if [ $FOUND -eq 0 ]; then
+      echo "🛑 pre-commit: possible secret in staged diff:"
+    fi
+    echo "  pattern: $pat"
+    echo "$HITS" | head -3 | sed 's/^/    /'
+    FOUND=1
+  fi
+done
+
+if [ $FOUND -eq 1 ]; then
+  echo ""
+  echo "If this is a false positive, run: git commit --no-verify"
+  exit 1
+fi

@@ -1,8 +1,12 @@
 import "./envcrypt.js";
 import cron from "node-cron";
+import fs from "fs";
 import readline from "readline";
 import path from "path";
 import { fileURLToPath } from "url";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 import { agentLoop } from "./agent.js";
 import { log } from "./logger.js";
 import { getMyPositions, closePosition, getActiveBin } from "./tools/dlmm.js";
@@ -25,6 +29,7 @@ import {
   createLiveMessage,
 } from "./telegram.js";
 import { generateBriefing } from "./briefing.js";
+import { captureDailyBaseline, formatJourneyText, formatJourneyHtml } from "./journey.js";
 import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop } from "./state.js";
 import { getActiveStrategy } from "./strategy-library.js";
 import { recordPositionSnapshot, recallForPool, addPoolNote } from "./pool-memory.js";
@@ -87,6 +92,8 @@ let _managementBusy = false; // prevents overlapping management cycles
 let _screeningBusy = false;  // prevents overlapping screening cycles
 let _screeningLastTriggered = 0; // epoch ms — prevents management from spamming screening
 let _pollTriggeredAt = 0; // epoch ms — cooldown for poller-triggered management
+const _solPriceHistory = []; // [{ts, price}] sliding window for SOL regime check
+const SOL_HISTORY_MAX_AGE_MS = 65 * 60 * 1000;
 const _peakConfirmTimers = new Map();
 const _trailingDropConfirmTimers = new Map();
 const TRAILING_PEAK_CONFIRM_DELAY_MS = 15_000;
@@ -156,6 +163,44 @@ function scheduleTrailingDropConfirmation(positionAddress) {
   }, TRAILING_DROP_CONFIRM_DELAY_MS);
 
   _trailingDropConfirmTimers.set(positionAddress, timer);
+}
+
+/**
+ * SOL market regime check. Returns { drop_pct, baseline_age_min } or null if no
+ * baseline yet. drop_pct > 0 means price has DROPPED from baseline. Snapshots
+ * are kept in a sliding 65-minute window. Caller decides what to do.
+ */
+function checkSolRegime(currentSolPrice) {
+  const now = Date.now();
+  if (Number.isFinite(currentSolPrice) && currentSolPrice > 0) {
+    _solPriceHistory.push({ ts: now, price: currentSolPrice });
+  }
+  while (_solPriceHistory.length && now - _solPriceHistory[0].ts > SOL_HISTORY_MAX_AGE_MS) {
+    _solPriceHistory.shift();
+  }
+  if (!Number.isFinite(currentSolPrice) || currentSolPrice <= 0) return null;
+  // Need at least one snapshot >= 50 min old for a meaningful 1h compare
+  const baseline = _solPriceHistory.find((s) => now - s.ts >= 50 * 60 * 1000);
+  if (!baseline) return null;
+  const dropPct = ((baseline.price - currentSolPrice) / baseline.price) * 100;
+  return { drop_pct: dropPct, baseline_age_min: Math.round((now - baseline.ts) / 60000) };
+}
+
+/**
+ * Sum today's realized PnL (USD) from closed positions in lessons.json.
+ * Returns total_pnl_usd (negative = net loss).
+ */
+function todayRealizedPnlUsd() {
+  try {
+    const lessonsPath = path.join(__dirname, "lessons.json");
+    if (!fs.existsSync(lessonsPath)) return 0;
+    const data = JSON.parse(fs.readFileSync(lessonsPath, "utf8"));
+    const todayUtc = new Date().toISOString().slice(0, 10);
+    const todays = (data.performance || []).filter((p) => (p.recorded_at || "").startsWith(todayUtc));
+    return todays.reduce((acc, p) => acc + (Number(p.pnl_usd) || 0), 0);
+  } catch {
+    return 0;
+  }
 }
 
 async function runBriefing() {
@@ -390,6 +435,11 @@ export async function runScreeningCycle({ silent = false } = {}) {
   let screenReport = null;
   try {
     [prePositions, preBalance] = await Promise.all([getMyPositions({ force: true }), getWalletBalances()]);
+    captureDailyBaseline({
+      wallet_sol: preBalance.sol,
+      sol_price: preBalance.sol_price,
+      total_usd: preBalance.total_usd || preBalance.sol_usd,
+    });
     if (prePositions.total_positions >= config.risk.maxPositions) {
       log("cron", `Screening skipped — max positions reached (${prePositions.total_positions}/${config.risk.maxPositions})`);
       screenReport = `Screening skipped — max positions reached (${prePositions.total_positions}/${config.risk.maxPositions}).`;
@@ -415,6 +465,36 @@ export async function runScreeningCycle({ silent = false } = {}) {
       });
       _screeningBusy = false;
       return screenReport;
+    }
+
+    // SOL market regime guard — skip when SOL is dumping
+    const solRegimeDropThreshold = Number(config.risk.solRegimeDropPct ?? 3);
+    if (solRegimeDropThreshold > 0) {
+      const regime = checkSolRegime(preBalance.sol_price);
+      if (regime && regime.drop_pct >= solRegimeDropThreshold) {
+        const reason = `SOL dumped ${regime.drop_pct.toFixed(2)}% vs ${regime.baseline_age_min}m ago — pausing screening`;
+        log("cron", `Screening skipped — ${reason}`);
+        screenReport = `Screening skipped — ${reason}.`;
+        appendDecision({ type: "skip", actor: "SCREENER", summary: "Screening skipped", reason });
+        _screeningBusy = false;
+        return screenReport;
+      }
+    }
+
+    // Daily loss circuit breaker
+    const maxDailyLossPct = Number(config.risk.maxDailyLossPct ?? 0);
+    if (maxDailyLossPct > 0) {
+      const todayPnlUsd = todayRealizedPnlUsd();
+      const startingUsd = preBalance.sol_usd > 0 ? preBalance.sol_usd - todayPnlUsd : 0;
+      const dailyLossPct = startingUsd > 0 ? (-todayPnlUsd / startingUsd) * 100 : 0;
+      if (todayPnlUsd < 0 && dailyLossPct >= maxDailyLossPct) {
+        const reason = `Daily loss ${dailyLossPct.toFixed(1)}% ($${todayPnlUsd.toFixed(2)}) hit circuit breaker (maxDailyLossPct ${maxDailyLossPct}%)`;
+        log("cron", `Screening skipped — ${reason}`);
+        screenReport = `Screening skipped — ${reason}.`;
+        appendDecision({ type: "skip", actor: "SCREENER", summary: "Screening skipped", reason });
+        _screeningBusy = false;
+        return screenReport;
+      }
     }
   } catch (e) {
     log("cron_error", `Screening pre-check failed: ${e.message}`);
@@ -918,7 +998,10 @@ function getDeterministicCloseRule(position, managementConfig) {
     position.active_bin != null &&
     position.upper_bin != null &&
     position.active_bin > position.upper_bin &&
-    (position.minutes_out_of_range ?? 0) >= managementConfig.outOfRangeWaitMinutes
+    (position.minutes_out_of_range ?? 0) >= managementConfig.outOfRangeWaitMinutes &&
+    // Grace period: don't close young positions on OOR alone — give them time
+    // to either recover into range or accumulate at least some fees.
+    (position.age_minutes ?? 0) >= (managementConfig.minPositionAgeMinutes ?? 30)
   ) {
     return { action: "CLOSE", rule: 4, reason: "OOR" };
   }
@@ -1273,6 +1356,7 @@ function formatHelpText() {
     "/candidates — show latest cached candidates",
     "/deploy <n> — deploy candidate by cached index",
     "/briefing — morning briefing",
+    "/journey [days] — daily realized PnL % journey (default 7 days)",
     "/hive — HiveMind sync status",
     "/hive pull — manual HiveMind pull now",
     "/pause — stop cron cycles",
@@ -1433,6 +1517,21 @@ async function telegramHandler(msg) {
   if (text === "/config") {
     await sendMessage(formatConfigSnapshot()).catch(() => {});
     return;
+  }
+
+  {
+    const journeyMatch = text.match(/^\/journey(?:\s+(\d+))?$/i);
+    if (journeyMatch) {
+      const n = Math.max(1, Math.min(60, parseInt(journeyMatch[1] || "7", 10)));
+      try {
+        await sendHTML(formatJourneyHtml(n)).catch(() => {
+          return sendMessage(formatJourneyText(n));
+        });
+      } catch (e) {
+        await sendMessage(`Error: ${e.message}`).catch(() => {});
+      }
+      return;
+    }
   }
 
   if (text === "/positions") {
@@ -1795,6 +1894,7 @@ Commands:
   /status        Refresh wallet + positions
   /candidates    Refresh top pool list
   /briefing      Show morning briefing (last 24h)
+  /journey [n]   Daily realized PnL journey (default 7 days)
   /learn         Study top LPers from the best current pool and save lessons
   /learn <addr>  Study top LPers from a specific pool address
   /thresholds    Show current screening thresholds + performance stats
@@ -1873,6 +1973,15 @@ Commands:
         console.log(`\n${briefing.replace(/<[^>]*>/g, "")}\n`);
       });
       return;
+    }
+
+    {
+      const journeyMatch = input.match(/^\/journey(?:\s+(\d+))?$/i);
+      if (journeyMatch) {
+        const n = Math.max(1, Math.min(60, parseInt(journeyMatch[1] || "7", 10)));
+        console.log(`\n${formatJourneyText(n)}\n`);
+        return;
+      }
     }
 
     if (input === "/candidates") {
