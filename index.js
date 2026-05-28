@@ -1937,8 +1937,12 @@ if (isMain && isTTY) {
     busy = false;
   }
 
-  // Always start autonomous cycles on launch
-  launchCron();
+  // Respect autoStartCron config
+  if (config.autoStartCron) {
+    launchCron();
+  } else {
+    console.log("autoStartCron=false — agent idle. Type 'go' to start autonomous cycles.\n");
+  }
   maybeRunMissedBriefing().catch(() => { });
 
   startPolling(telegramHandler);
@@ -2163,16 +2167,21 @@ Focus on: hold duration, entry/exit timing, what win rates look like, whether sc
   rl.on("close", () => shutdown("stdin closed"));
 
 } else if (isMain) {
-  // Non-TTY: start immediately
-  log("startup", "Non-TTY mode — starting cron cycles immediately.");
-  startCronJobs();
-  maybeRunMissedBriefing().catch(() => { });
-  startPolling(telegramHandler);
-  (async () => {
-    try {
-      await runScreeningCycle({ silent: false });
-    } catch (e) {
-      log("startup_error", e.message);
-    }
-  })();
+  // Non-TTY: respect autoStartCron config
+  if (config.autoStartCron) {
+    log("startup", "Non-TTY mode — autoStartCron=true, starting cron cycles immediately.");
+    startCronJobs();
+    maybeRunMissedBriefing().catch(() => { });
+    startPolling(telegramHandler);
+    (async () => {
+      try {
+        await runScreeningCycle({ silent: false });
+      } catch (e) {
+        log("startup_error", e.message);
+      }
+    })();
+  } else {
+    log("startup", "Non-TTY mode — autoStartCron=false, agent idle. Use /resume to start autonomous cycles.");
+    startPolling(telegramHandler);
+  }
 }

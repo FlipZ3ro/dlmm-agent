@@ -252,6 +252,7 @@ function normalizeConfigValue(key, value) {
     "darwinEnabled",
     "lpAgentRelayEnabled",
     "dualStrategyEnabled",
+    "autoStartCron",
   ]);
   const arrayKeys = new Set(["allowedLaunchpads", "blockedLaunchpads"]);
   const stringKeys = new Set([

@@ -146,6 +146,10 @@ export const config = {
     aggressiveOorWaitMin: u.aggressiveOorWaitMin ?? 15, // tighter: close fast
   },
 
+  // ─── Autonomous Mode ─────────────────────
+  // When false, agent only works when called via /resume or Telegram command.
+  autoStartCron: u.autoStartCron ?? false,
+
   // ─── Strategy Mapping ───────────────────
   strategy: {
     strategy:     u.strategy     ?? "bid_ask",

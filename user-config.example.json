@@ -88,6 +88,8 @@
   "safeguardOorWaitMin": 60,
   "aggressiveOorWaitMin": 15,
 
+  "autoStartCron": false,
+
   "agentId": "",
   "publicApiKey": "",
   "agentMeridianApiUrl": "https://api.agentmeridian.xyz/api",
