@@ -31,7 +31,7 @@ import {
 import { generateBriefing } from "./briefing.js";
 import { captureDailyBaseline, formatJourneyText, formatJourneyHtml } from "./journey.js";
 import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop } from "./state.js";
-import { getActiveStrategy } from "./strategy-library.js";
+import { getActiveStrategy, getDualStrategies, pickDualStrategyRole } from "./strategy-library.js";
 import { recordPositionSnapshot, recallForPool, addPoolNote } from "./pool-memory.js";
 import { checkSmartWalletsOnPool } from "./smart-wallets.js";
 import { getTokenNarrative, getTokenInfo } from "./tools/token.js";
@@ -333,6 +333,8 @@ export async function runManagementCycle({ silent = false } = {}) {
       const unclaimed = config.management.solMode ? `◎${p.unclaimed_fees_usd ?? "?"}` : `$${p.unclaimed_fees_usd ?? "?"}`;
       const statusLabel = act.action === "INSTRUCTION" ? "HOLD (instruction)" : act.action;
       let line = `**${p.pair}** | Age: ${p.age_minutes ?? "?"}m | Val: ${val} | Unclaimed: ${unclaimed} | PnL: ${p.pnl_pct ?? "?"}% | Yield: ${p.fee_per_tvl_24h ?? "?"}% | ${inRange} | ${statusLabel}`;
+      const trackedPos = getTrackedPosition(p.position);
+      if (trackedPos?.strategy_role) line += ` | 🏷️ ${trackedPos.strategy_role}`;
       if (p.instruction) line += `\nNote: "${p.instruction}"`;
       if (act.action === "CLOSE" && act.rule === "exit") line += `\n⚡ Trailing TP: ${act.reason}`;
       if (act.action === "CLOSE" && act.rule && act.rule !== "exit") line += `\nRule ${act.rule}: ${act.reason}`;
@@ -515,9 +517,54 @@ export async function runScreeningCycle({ silent = false } = {}) {
 
     // Load active strategy
     const activeStrategy = getActiveStrategy();
-    const strategyBlock = activeStrategy
-      ? `ACTIVE STRATEGY: ${activeStrategy.name} — LP: ${activeStrategy.lp_strategy} | bins_above: ${activeStrategy.range?.bins_above ?? 0} (FIXED — never change) | deposit: ${activeStrategy.entry?.single_side === "sol" ? "SOL only (amount_y, amount_x=0)" : "dual-sided"} | best for: ${activeStrategy.best_for}`
-      : `No active strategy — use default bid_ask, bins_above: 0, SOL only.`;
+    let strategyBlock;
+    let dualStrategyRole = null;
+    let dualStrategyDeployAmount = deployAmount;
+    let dualStrategyMeta = null;
+
+    if (config.dualStrategy?.enabled) {
+      // DUAL-STRATEGY MODE: pick which role to deploy this cycle
+      const dualResult = pickDualStrategyRole(prePositions.positions || []);
+      if (dualResult) {
+        dualStrategyRole = dualResult.role;
+        const picked = dualResult.strategy;
+        const pct = dualResult.role === "safeguard"
+          ? config.dualStrategy.primaryPct
+          : (1 - config.dualStrategy.primaryPct);
+        dualStrategyDeployAmount = parseFloat((deployAmount * pct).toFixed(4));
+
+        strategyBlock = `DUAL-STRATEGY MODE — ROLE: ${dualResult.role.toUpperCase()}
+ACTIVE STRATEGY: ${picked.name} — LP: ${picked.lp_strategy}
+bins_below: ${picked.range?.bins_below_override ?? config.strategy.defaultBinsBelow} (use this EXACTLY — do not calculate)
+bins_above: 0 (FIXED — never change)
+deposit: SOL only (amount_y=${dualStrategyDeployAmount}, amount_x=0)
+best for: ${picked.best_for}
+management: ${picked.management_notes ?? "Standard"}
+
+This cycle you are deploying the "${dualResult.role}" slot.
+${dualResult.role === "safeguard"
+  ? "SAFEGUARD = safety net. Wider range, steady fees, survives volatility. Pick a stable high-volume pool."
+  : "AGGRESSIVE = alpha generator. Tight range, concentrated fees, higher yield. Pick a trending high-momentum pool."
+}
+Do NOT deviate from the bins_below value shown above.`;
+
+        dualStrategyMeta = {
+          role: dualResult.role,
+          strategyId: picked.id,
+          strategyName: picked.name,
+          deployAmountPct: pct,
+        };
+
+        log("cron", `Dual-strategy: deploying ${dualResult.role} (${picked.name}) — ${dualStrategyDeployAmount} SOL (${(pct * 100).toFixed(0)}%)`);
+      }
+    }
+
+    // Fallback to single strategy if dual-strategy didn't produce a result
+    if (!strategyBlock) {
+      strategyBlock = activeStrategy
+        ? `ACTIVE STRATEGY: ${activeStrategy.name} — LP: ${activeStrategy.lp_strategy} | bins_above: ${activeStrategy.range?.bins_above ?? 0} (FIXED — never change) | deposit: ${activeStrategy.entry?.single_side === "sol" ? "SOL only (amount_y, amount_x=0)" : "dual-sided"} | best for: ${activeStrategy.best_for}`
+        : `No active strategy — use default bid_ask, bins_above: 0, SOL only.`;
+    }
 
     // Fetch top candidates, then recon each sequentially with a small delay to avoid 429s
     const topCandidates = await getTopCandidates({ limit: 10 }).catch(() => null);
@@ -691,7 +738,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
     const { content } = await agentLoop(`
 SCREENING CYCLE
 ${strategyBlock}
-Positions: ${prePositions.total_positions}/${config.risk.maxPositions} | SOL: ${currentBalance.sol.toFixed(3)} | Deploy: ${deployAmount} SOL
+Positions: ${prePositions.total_positions}/${config.risk.maxPositions} | SOL: ${currentBalance.sol.toFixed(3)} | Deploy: ${dualStrategyRole ? dualStrategyDeployAmount : deployAmount} SOL
 
 PRE-LOADED CANDIDATES (${passing.length} pools):
 ${candidateBlocks.join("\n\n")}
@@ -981,6 +1028,15 @@ function getDeterministicCloseRule(position, managementConfig) {
     return false;
   })();
 
+  // Role-aware OOR wait time — aggressive positions get faster close
+  const strategyRole = tracked?.strategy_role;
+  let oorWaitMinutes = managementConfig.outOfRangeWaitMinutes;
+  if (config.dualStrategy?.enabled && strategyRole === "aggressive") {
+    oorWaitMinutes = config.dualStrategy.aggressiveOorWaitMin ?? 15;
+  } else if (config.dualStrategy?.enabled && strategyRole === "safeguard") {
+    oorWaitMinutes = config.dualStrategy.safeguardOorWaitMin ?? 60;
+  }
+
   if (!pnlSuspect && position.pnl_pct != null && position.pnl_pct <= managementConfig.stopLossPct) {
     return { action: "CLOSE", rule: 1, reason: "stop loss" };
   }
@@ -998,12 +1054,12 @@ function getDeterministicCloseRule(position, managementConfig) {
     position.active_bin != null &&
     position.upper_bin != null &&
     position.active_bin > position.upper_bin &&
-    (position.minutes_out_of_range ?? 0) >= managementConfig.outOfRangeWaitMinutes &&
+    (position.minutes_out_of_range ?? 0) >= oorWaitMinutes &&
     // Grace period: don't close young positions on OOR alone — give them time
     // to either recover into range or accumulate at least some fees.
     (position.age_minutes ?? 0) >= (managementConfig.minPositionAgeMinutes ?? 30)
   ) {
-    return { action: "CLOSE", rule: 4, reason: "OOR" };
+    return { action: "CLOSE", rule: 4, reason: `OOR (${strategyRole ?? "default"}: ${oorWaitMinutes}m wait)` };
   }
   if (
     position.fee_per_tvl_24h != null &&

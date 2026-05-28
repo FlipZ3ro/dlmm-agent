@@ -248,10 +248,10 @@ function normalizeConfigValue(key, value) {
     "avoidPvpSymbols",
     "blockPvpSymbols",
     "autoSwapAfterClaim",
-    "trailingTakeProfit",
     "solMode",
     "darwinEnabled",
     "lpAgentRelayEnabled",
+    "dualStrategyEnabled",
   ]);
   const arrayKeys = new Set(["allowedLaunchpads", "blockedLaunchpads"]);
   const stringKeys = new Set([

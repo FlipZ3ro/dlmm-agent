@@ -169,6 +169,11 @@ WARNING: This executes a real on-chain transaction. Check DRY_RUN mode.`,
             enum: ["bid_ask", "spot"],
             description: "DLMM strategy type. If user specifies, use exactly what they said. Otherwise use the active strategy's lp_strategy field."
           },
+          strategy_role: {
+            type: "string",
+            enum: ["safeguard", "aggressive"],
+            description: "Dual-strategy role tag. Pass the role from the strategy block (e.g. 'safeguard' or 'aggressive'). Used for position management rules. Only set when dual-strategy mode is active."
+          },
           bins_below: {
             type: "number",
             description: "Number of bins below the current active bin. For single-side SOL deploys, this is the main range input: lower bin = active bin - bins_below, upper bin = active bin."

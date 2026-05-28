@@ -136,6 +136,7 @@ DEPLOY RULES:
 - Bin steps must be [80-125].
 - Pick ONE pool only when conviction is real. If only one weak candidate survives, skip and explain why none qualify.
 - METADATA REQUIRED: When calling deploy_position you MUST pass bin_step, volatility, fee_tvl_ratio, organic_score, and base_mint from the candidate. The learning system needs this to record what worked.
+- DUAL-STRATEGY: If the strategy block says "DUAL-STRATEGY MODE", you MUST also pass strategy_role (either "safeguard" or "aggressive") in your deploy_position call. Match the role shown in the strategy block. Use the bins_below value shown in the strategy block — do NOT recalculate.
 
 ${weightsSummary ? `${weightsSummary}\nPrioritize candidates whose strongest attributes align with high-weight signals.\n\n` : ""}${lessons ? `LESSONS LEARNED:\n${lessons}\n` : ""}Timestamp: ${new Date().toISOString()}
 `;

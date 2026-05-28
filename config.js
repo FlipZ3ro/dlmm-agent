@@ -135,6 +135,17 @@ export const config = {
     solMode:               u.solMode               ?? false,
   },
 
+  // ─── Dual-Strategy Mode ──────────────────
+  // Run two uncorrelated strategies simultaneously for smoother equity curve.
+  dualStrategy: {
+    enabled:    u.dualStrategyEnabled    ?? false,
+    // Deploy amount split: safeguard gets primaryPct, aggressive gets (1-primaryPct)
+    primaryPct: u.dualStrategyPrimaryPct ?? 0.6,   // 60% to safeguard
+    // OOR management overrides per role
+    safeguardOorWaitMin: u.safeguardOorWaitMin ?? 60,  // wider: hold longer
+    aggressiveOorWaitMin: u.aggressiveOorWaitMin ?? 15, // tighter: close fast
+  },
+
   // ─── Strategy Mapping ───────────────────
   strategy: {
     strategy:     u.strategy     ?? "bid_ask",
@@ -292,5 +303,10 @@ export function reloadScreeningThresholds() {
       config.strategy.minBinsBelow,
       Math.min(config.strategy.maxBinsBelow, Math.round(defaultBinsBelow)),
     );
+    // Dual-strategy config reload
+    if (fresh.dualStrategyEnabled !== undefined) config.dualStrategy.enabled = !!fresh.dualStrategyEnabled;
+    if (fresh.dualStrategyPrimaryPct != null) config.dualStrategy.primaryPct = Number(fresh.dualStrategyPrimaryPct);
+    if (fresh.safeguardOorWaitMin != null) config.dualStrategy.safeguardOorWaitMin = Number(fresh.safeguardOorWaitMin);
+    if (fresh.aggressiveOorWaitMin != null) config.dualStrategy.aggressiveOorWaitMin = Number(fresh.aggressiveOorWaitMin);
   } catch { /* ignore */ }
 }

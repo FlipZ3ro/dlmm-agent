@@ -135,6 +135,32 @@ bins_below = round(minBinsBelow + (volatility / 5) * (maxBinsBelow - minBinsBelo
 
 ---
 
+## Dual-Strategy Mode
+
+When `dualStrategyEnabled: true` in user-config.json, the agent runs two uncorrelated strategies simultaneously for a smoother equity curve.
+
+**Strategies:**
+- **Wide + Safeguard** (`wide_safeguard`): 55 bins below, bid_ask, wider range = stays in range longer, steady fees, low maintenance
+- **Tight + Aggressive** (`tight_aggressive`): 35 bins below, spot, narrower range = concentrated fees, higher yield, faster rotation
+
+**How it works:**
+1. `pickDualStrategyRole()` checks current positions and picks which role to deploy
+2. Deploy amount is split: safeguard gets `dualStrategyPrimaryPct` (default 60%), aggressive gets the rest
+3. Each position is tagged with `strategy_role` ("safeguard" or "aggressive") in state.json
+4. Management uses role-specific OOR wait times: safeguard = 60min, aggressive = 15min
+
+**Config keys:**
+| Key | Default | Description |
+|-----|---------|-------------|
+| dualStrategyEnabled | false | Enable dual-strategy mode |
+| dualStrategyPrimaryPct | 0.6 | % of deploy amount to safeguard |
+| safeguardOorWaitMin | 60 | OOR wait for safeguard positions |
+| aggressiveOorWaitMin | 15 | OOR wait for aggressive positions |
+
+**Strategy pairing** is stored in `strategy-library.json` under `dualStrategy.safeguardId` and `dualStrategy.aggressiveId`. Use `setDualStrategyPair` tool to change the pairing.
+
+---
+
 ## Telegram Commands
 
 Handled directly in `index.js` (bypass LLM):

@@ -89,6 +89,57 @@ const DEFAULT_STRATEGIES = {
     exit: { take_profit_pct: 10, notes: "When total return >= 10% of deployed capital: withdraw_liquidity(bps=5000) to take 50% off. Remaining 50% keeps running. Repeat at next threshold." },
     best_for: "Locking in profits without fully exiting winning positions",
   },
+  // ─── Dual-Strategy Defaults ────────────────────────────────────
+  // Designed to run simultaneously — uncorrelated equity curves.
+  // Wide = stability/safety, Tight = alpha/aggression.
+  wide_safeguard: {
+    id: "wide_safeguard",
+    name: "Wide + Safeguard",
+    author: "meridian",
+    lp_strategy: "bid_ask",
+    dual_strategy_role: "safeguard",
+    token_criteria: { notes: "Any token with decent volume. Prioritize stability — this position is the safety net." },
+    entry: {
+      condition: "Deploy with wider range for maximum coverage",
+      single_side: "sol",
+      notes: "Wider bin range = stays in range longer, earns steady fees. Lower peak yield but much lower OOR risk. Acts as portfolio stabilizer.",
+    },
+    range: {
+      type: "custom",
+      bins_below_override: 55,
+      notes: "Wide range: 55 bins below active bin. Covers ~20-30% downside depending on bin step. Maximum staying power.",
+    },
+    exit: {
+      take_profit_pct: 8,
+      notes: "Only close when: (1) OOR for >60min, (2) TP hit, or (3) pool volume dies. This is the 'set and forget' position — less management needed.",
+    },
+    best_for: "Portfolio stability — steady fees, low maintenance, survives volatility",
+    management_notes: "Less aggressive OOR management. Allow wider OOR wait (60min vs 30min). Re-deploy wider if price keeps trending.",
+  },
+  tight_aggressive: {
+    id: "tight_aggressive",
+    name: "Tight + Aggressive",
+    author: "meridian",
+    lp_strategy: "spot",
+    dual_strategy_role: "aggressive",
+    token_criteria: { notes: "High volume, trending tokens with strong momentum. This is the alpha generator — pick winners." },
+    entry: {
+      condition: "Deploy with tight concentrated range for maximum fee capture",
+      single_side: "sol",
+      notes: "Narrow bin range = concentrated liquidity = higher fee per dollar when in range. Higher OOR risk but premium yield. Alpha generator.",
+    },
+    range: {
+      type: "custom",
+      bins_below_override: 35,
+      notes: "Tight range: 35 bins below active bin. Concentrated liquidity for maximum fee capture. ~10-15% downside coverage.",
+    },
+    exit: {
+      take_profit_pct: 5,
+      notes: "Close quickly on: (1) OOR >15min (don't wait — redeploy at better price), (2) TP hit, (3) volume drops >50%. Fast rotation = more alpha.",
+    },
+    best_for: "Alpha generation — high fees when in range, fast rotation when OOR",
+    management_notes: "Aggressive OOR management. Quick close and redeploy. Tighter stop-loss. More active rebalancing.",
+  },
 };
 
 function ensureDefaultStrategies() {
@@ -224,4 +275,89 @@ export function getActiveStrategy() {
   const db = load();
   if (!db.active || !db.strategies[db.active]) return null;
   return db.strategies[db.active];
+}
+
+// ─── Dual-Strategy Support ─────────────────────────────────────
+
+/**
+ * Get both dual-strategy profiles for the dual-strategy mode.
+ * Returns { safeguard, aggressive } or null if either is missing.
+ */
+export function getDualStrategies() {
+  const db = load();
+  const safeguardId = db.dualStrategy?.safeguardId || "wide_safeguard";
+  const aggressiveId = db.dualStrategy?.aggressiveId || "tight_aggressive";
+  const safeguard = db.strategies[safeguardId];
+  const aggressive = db.strategies[aggressiveId];
+  if (!safeguard || !aggressive) return null;
+  return {
+    safeguard: { ...safeguard, _role: "safeguard" },
+    aggressive: { ...aggressive, _role: "aggressive" },
+  };
+}
+
+/**
+ * Configure the dual-strategy pairing.
+ */
+export function setDualStrategyPair({ safeguardId, aggressiveId }) {
+  const db = load();
+  if (safeguardId && !db.strategies[safeguardId]) {
+    return { error: `Safeguard strategy "${safeguardId}" not found`, available: Object.keys(db.strategies) };
+  }
+  if (aggressiveId && !db.strategies[aggressiveId]) {
+    return { error: `Aggressive strategy "${aggressiveId}" not found`, available: Object.keys(db.strategies) };
+  }
+  if (!db.dualStrategy) db.dualStrategy = {};
+  if (safeguardId) db.dualStrategy.safeguardId = safeguardId;
+  if (aggressiveId) db.dualStrategy.aggressiveId = aggressiveId;
+  save(db);
+  log("strategy", `Dual-strategy pair: safeguard=${db.dualStrategy.safeguardId}, aggressive=${db.dualStrategy.aggressiveId}`);
+  return {
+    safeguard: db.dualStrategy.safeguardId,
+    aggressive: db.dualStrategy.aggressiveId,
+  };
+}
+
+/**
+ * Determine which strategy role to use next based on current positions.
+ * Logic: alternate between safeguard and aggressive, with bias toward
+ * safeguard when positions are few (safety first) and aggressive when
+ * positions are stable (seek alpha).
+ *
+ * @param {Array} positions - current open positions
+ * @returns {{ role: "safeguard"|"aggressive", strategy: Object }}
+ */
+export function pickDualStrategyRole(positions = []) {
+  const dual = getDualStrategies();
+  if (!dual) return null;
+
+  const posCount = positions.length;
+
+  // Count positions by their strategy role (from state metadata)
+  let safeguardCount = 0;
+  let aggressiveCount = 0;
+  for (const p of positions) {
+    if (p._strategyRole === "aggressive") aggressiveCount++;
+    else safeguardCount++;
+  }
+
+  // Decision matrix:
+  // 0 positions → safeguard (safety first)
+  // 1 position, safeguard → aggressive (seek alpha)
+  // 1 position, aggressive → safeguard (balance)
+  // 2+ positions → alternate based on ratio
+  let role;
+  if (posCount === 0) {
+    role = "safeguard";
+  } else if (posCount === 1) {
+    role = safeguardCount > 0 ? "aggressive" : "safeguard";
+  } else {
+    // Prefer whichever has fewer positions
+    role = safeguardCount <= aggressiveCount ? "safeguard" : "aggressive";
+  }
+
+  return {
+    role,
+    strategy: dual[role],
+  };
 }

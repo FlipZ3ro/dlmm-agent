@@ -83,6 +83,11 @@
   "darwinCeiling": 2.5,
   "darwinMinSamples": 10,
 
+  "dualStrategyEnabled": false,
+  "dualStrategyPrimaryPct": 0.6,
+  "safeguardOorWaitMin": 60,
+  "aggressiveOorWaitMin": 15,
+
   "agentId": "",
   "publicApiKey": "",
   "agentMeridianApiUrl": "https://api.agentmeridian.xyz/api",
